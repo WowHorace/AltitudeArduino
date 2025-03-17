@@ -1,0 +1,163 @@
+#include <Wire.h>
+#include <SPI.h>
+#include <SD.h>
+#include <LiquidCrystal_I2C.h>
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+#include <Adafruit_AHTX0.h>
+#include <Adafruit_BMP280.h>
+
+// 初始化对象
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+TinyGPSPlus gps;
+SoftwareSerial gpsSerial(4, 3);  // RX=4, TX=3
+Adafruit_AHTX0 aht;
+Adafruit_BMP280 bmp;
+
+// 常量定义
+const int chipSelect = 10;
+const float SEA_LEVEL = 1013.25;
+
+// 变量定义
+float temperature, humidity, pressure, calcAlt;
+float gpsLat, gpsLng, gpsAlt;
+int satellites;
+char timeStr[20];
+bool sdOK = false;
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+  gpsSerial.begin(9600);
+  
+  // 初始化LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.print("初始化...");
+  
+  // 初始化传感器
+  if (!aht.begin()) {
+    Serial.println(F("AHT20错误"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("AHT20错误"));
+    while (1) delay(100);
+  }
+  
+  if (!bmp.begin(0x77)) {
+    Serial.println(F("BMP280错误"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("BMP280错误"));
+    while (1) delay(100);
+  }
+  
+  // 初始化SD卡
+  sdOK = SD.begin(chipSelect);
+  if (sdOK) {
+    File file = SD.open("SENSOR.CSV", FILE_WRITE);
+    if (file && file.size() == 0) {
+      file.println(F("时间,经度,纬度,GPS海拔,气压,温度,计算海拔,湿度"));
+    }
+    if (file) file.close();
+  } else {
+    Serial.println(F("SD卡错误"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("SD卡错误"));
+  }
+  
+  lcd.clear();
+  lcd.print(F("初始化完成"));
+  delay(1000);
+  lcd.clear();
+}
+
+void loop() {
+  // 获取GPS数据
+  for (unsigned long start = millis(); millis() - start < 1000;) {
+    while (gpsSerial.available()) {
+      gps.encode(gpsSerial.read());
+    }
+  }
+  
+  // 读取环境数据
+  sensors_event_t humid, temp;
+  aht.getEvent(&humid, &temp);
+  temperature = temp.temperature;
+  humidity = humid.relative_humidity;
+  pressure = bmp.readPressure() / 100.0;
+  calcAlt = 44330 * (1.0 - pow(pressure / SEA_LEVEL, 0.1903));
+  
+  // 获取GPS信息
+  bool validGPS = gps.location.isValid();
+  if (validGPS) {
+    gpsLat = gps.location.lat();
+    gpsLng = gps.location.lng();
+    gpsAlt = gps.altitude.meters();
+    satellites = gps.satellites.value();
+  }
+  
+  // 格式化时间
+  if (gps.date.isValid() && gps.time.isValid()) {
+    sprintf(timeStr, "%04d-%02d-%02d %02d:%02d:%02d", 
+      gps.date.year(), gps.date.month(), gps.date.day(),
+      gps.time.hour(), gps.time.minute(), gps.time.second());
+  } else {
+    strcpy(timeStr, "无效");
+  }
+  
+  // 打印到串口
+  Serial.println(F("=================="));
+  Serial.print(F("时间: ")); Serial.println(timeStr);
+  Serial.print(F("GPS: "));
+  if (validGPS) {
+    Serial.print(F("经度:")); Serial.print(gpsLng, 6);
+    Serial.print(F(" 纬度:")); Serial.print(gpsLat, 6);
+    Serial.print(F(" 高度:")); Serial.print(gpsAlt, 1);
+    Serial.print(F("m 卫星:")); Serial.println(satellites);
+  } else {
+    Serial.println(F("搜索中..."));
+  }
+  Serial.print(F("温度:")); Serial.print(temperature, 1); Serial.print(F("°C "));
+  Serial.print(F("湿度:")); Serial.print(humidity, 1); Serial.println(F("%"));
+  Serial.print(F("气压:")); Serial.print(pressure, 1); Serial.print(F("hPa "));
+  Serial.print(F("计算海拔:")); Serial.print(calcAlt, 1); Serial.println(F("m"));
+  
+  // 记录到SD卡
+  if (sdOK) {
+    File file = SD.open("SENSOR.CSV", FILE_WRITE);
+    if (file) {
+      file.print(timeStr);
+      file.print(F(","));
+      if (validGPS) {
+        file.print(gpsLng, 6); file.print(F(","));
+        file.print(gpsLat, 6); file.print(F(","));
+        file.print(gpsAlt, 1);
+      } else {
+        file.print(F("0,0,0"));
+      }
+      file.print(F(","));
+      file.print(pressure, 1); file.print(F(","));
+      file.print(temperature, 1); file.print(F(","));
+      file.print(calcAlt, 1); file.print(F(","));
+      file.println(humidity, 1);
+      file.close();
+      Serial.println(F("已记录SD卡"));
+    }
+  }
+  
+  // 更新LCD显示
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  if (validGPS) {
+    lcd.print(F("GPS Alt:"));
+    lcd.print(gpsAlt, 1);
+    lcd.print(F("m"));
+  } else {
+    lcd.print(F("GPS: 搜索中..."));
+  }
+  lcd.setCursor(0, 1);
+  lcd.print(F("Bar Alt:"));
+  lcd.print(calcAlt, 1);
+  lcd.print(F("m"));
+  
+  delay(2000);
+}
